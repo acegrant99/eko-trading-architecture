@@ -1,7 +1,7 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Optional, Dict, Any
 from enum import Enum
-from typing import Optional
 
 class Side(Enum):
     BUY = "BUY"
@@ -16,8 +16,8 @@ class MarketState:
     ask: Optional[float] = None
     volume_24h: Optional[float] = None
     spread_bps: float = 0.0
-    timestamp: datetime = field(default_factory=datetime.utcnow)
-    extra: dict = field(default_factory=dict)
+    timestamp: datetime = None
+    extra: Dict[str, Any] = None
 
 @dataclass
 class Signal:
