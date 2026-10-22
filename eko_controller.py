@@ -1,17 +1,19 @@
-"""Eko Controller — the autonomous brain that ties everything together.
+"""Eko Controller — autonomous brain with paper + live modes.
 
-Supports paper (default) and live trading modes.
-Live mode requires COINBASE_API_KEY + COINBASE_API_SECRET and explicit activation.
+Live features:
+- Limit + market orders
+- Position / balance sync from Coinbase
+- Tighter live-only risk rules
+- Cancel-all support
 """
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 
 from data.live_data import LiveDataProvider
-from data.models import Signal, Side
+from data.models import Signal, Side, OrderType
 from strategy.sma_crossover import SMACrossover
 from risk.risk_manager import RiskManager, RiskConfig
 from execution.paper_executor import PaperExecutor
@@ -19,31 +21,30 @@ from execution.live_executor import LiveExecutor
 
 
 class EkoController:
-    """Superior controller that analyzes the system and acts."""
-
     def __init__(self):
         self.data = LiveDataProvider()
         self.strategy = SMACrossover(fast=5, slow=15)
 
-        # More conservative defaults when live keys are present
+        # Base (paper) risk config — still conservative
         risk_cfg = RiskConfig(
-            max_position_pct=0.02,       # tighter for live
-            max_daily_loss_pct=0.015,
-            min_confidence=0.60,
-            max_open_positions=2,
+            max_position_pct=0.03,
+            max_daily_loss_pct=0.02,
+            min_confidence=0.58,
+            max_open_positions=3,
+            max_notional_usd=1000.0,
+            require_limit_in_live=False,
         )
         self.risk = RiskManager(risk_cfg, equity=10_000.0)
 
         self.paper = PaperExecutor(starting_equity=10_000.0)
         self.live = LiveExecutor()
 
-        # Default is always paper for safety
-        self.mode = "paper"  # "paper" | "live"
+        self.mode = "paper"
+        self.prefer_limit = True          # prefer limit orders when possible
         self.memory: List[str] = []
         self.last_market = None
         self.last_signal: Optional[Signal] = None
         self.last_action: Dict[str, Any] = {}
-        self.running = False
 
     @property
     def executor(self):
@@ -55,27 +56,64 @@ class EkoController:
             if not self.live.is_ready():
                 return {
                     "ok": False,
-                    "message": "Cannot enable LIVE mode: Coinbase API keys missing or client failed to init. "
-                               "Set COINBASE_API_KEY and COINBASE_API_SECRET environment variables.",
+                    "message": "Cannot enable LIVE mode: set COINBASE_API_KEY and COINBASE_API_SECRET first.",
                 }
+            # Sync real balances before enabling
+            sync = self.live.sync_positions()
+            if "error" in sync:
+                return {"ok": False, "message": f"Failed to sync positions: {sync['error']}"}
+
             self.mode = "live"
+            self.risk.set_live_mode(True)
+            if self.live.equity_usd > 0:
+                self.risk.update_equity(self.live.equity_usd)
+            self.risk.sync_positions(self.live.positions)
             self.remember("Switched to LIVE trading mode")
             return {
                 "ok": True,
-                "message": "⚠️ LIVE MODE ENABLED. Real orders will be sent to Coinbase. Kill switch is available.",
+                "message": "⚠️ LIVE MODE ENABLED. Real orders will be sent. Kill switch available. Positions synced.",
                 "mode": "live",
+                "sync": sync,
             }
         else:
             self.mode = "paper"
+            self.risk.set_live_mode(False)
+            self.risk.sync_positions(self.paper.positions)
+            self.risk.update_equity(self.paper.equity)
             self.remember("Switched back to PAPER mode")
             return {"ok": True, "message": "Paper mode active. No real orders.", "mode": "paper"}
 
+    def _build_signal(self, raw: Signal, market) -> Signal:
+        """Optionally convert strategy signal into a limit order."""
+        if not self.prefer_limit or raw.side == Side.HOLD:
+            return raw
+
+        last = market.last or 0
+        if last <= 0:
+            return raw
+
+        # Slightly passive limit: buy below, sell above
+        if raw.side == Side.BUY:
+            limit_price = round(last * 0.9995, 2)
+        else:
+            limit_price = round(last * 1.0005, 2)
+
+        return Signal(
+            side=raw.side,
+            size=raw.size,
+            confidence=raw.confidence,
+            reason=raw.reason + " [limit]",
+            symbol=raw.symbol,
+            order_type=OrderType.LIMIT,
+            limit_price=limit_price,
+        )
+
     async def tick(self, symbol: str = "BTC-USD") -> dict:
-        """One full cycle: data → strategy → risk → (maybe) execute."""
         market = await self.data.get_market_state(symbol)
         self.last_market = market
 
-        signal = self.strategy.generate_signal(market)
+        raw_signal = self.strategy.generate_signal(market)
+        signal = self._build_signal(raw_signal, market) if self.mode == "live" else raw_signal
         self.last_signal = signal
 
         allowed, reason = self.risk.check(signal, market)
@@ -90,9 +128,9 @@ class EkoController:
         }
 
         if allowed and signal.side != Side.HOLD:
-            # Extra safety: in live mode, force very small size unless user forced it
-            if self.mode == "live" and signal.confidence < 0.85:
-                signal.size = min(signal.size, 0.002)
+            if self.mode == "live":
+                # Extra hard size cap for autonomous live ticks
+                signal.size = min(signal.size, 0.0015)
 
             exec_result = self.executor.execute(signal, market)
             result["execution"] = exec_result
@@ -101,6 +139,10 @@ class EkoController:
             if self.mode == "paper":
                 self.risk.open_positions = self.paper.positions
                 self.risk.update_equity(self.paper.equity)
+            else:
+                self.risk.sync_positions(self.live.positions)
+                if self.live.equity_usd > 0:
+                    self.risk.update_equity(self.live.equity_usd)
         else:
             result["execution"] = {"status": "skipped", "reason": reason}
 
@@ -116,7 +158,6 @@ class EkoController:
         return self.memory[-limit:]
 
     async def handle_command(self, text: str) -> dict:
-        """Simple natural-language command router."""
         text = (text or "").strip().lower()
 
         if not text or text in ("status", "how are you", "eko status"):
@@ -129,14 +170,27 @@ class EkoController:
             return self.set_mode("paper")
 
         if "kill switch" in text or text == "kill":
-            on = "on" in text or "activate" in text or "enable" in text
             off = "off" in text or "deactivate" in text or "disable" in text
             if off:
                 self.risk.set_kill_switch(False)
                 return {"ok": True, "message": "Kill switch DEACTIVATED. Trading resumed."}
-            else:
-                self.risk.set_kill_switch(True)
-                return {"ok": True, "message": "Kill switch ACTIVATED. All trading halted."}
+            self.risk.set_kill_switch(True)
+            return {"ok": True, "message": "Kill switch ACTIVATED. All trading halted."}
+
+        if text in ("cancel all", "cancel orders", "flatten orders"):
+            if self.mode != "live":
+                return {"ok": False, "message": "Cancel only available in live mode."}
+            result = self.live.cancel_all_orders()
+            return {"ok": True, "message": "Cancel request sent", "result": result}
+
+        if text in ("sync", "sync positions", "refresh positions"):
+            if self.mode != "live":
+                return {"ok": False, "message": "Sync only meaningful in live mode."}
+            sync = self.live.sync_positions()
+            self.risk.sync_positions(self.live.positions)
+            if self.live.equity_usd > 0:
+                self.risk.update_equity(self.live.equity_usd)
+            return {"ok": True, "message": "Positions synced", "sync": sync}
 
         if text.startswith("force buy") or text.startswith("buy"):
             return await self._force_trade(Side.BUY, text)
@@ -144,14 +198,19 @@ class EkoController:
         if text.startswith("force sell") or text.startswith("sell"):
             return await self._force_trade(Side.SELL, text)
 
+        if text.startswith("limit buy"):
+            return await self._force_trade(Side.BUY, text, force_limit=True)
+
+        if text.startswith("limit sell"):
+            return await self._force_trade(Side.SELL, text, force_limit=True)
+
         if text.startswith("remember "):
             note = text[9:].strip()
             self.remember(note)
             return {"ok": True, "message": f"Remembered: {note}"}
 
         if text in ("recall", "memory", "what do you remember"):
-            notes = self.recall()
-            return {"ok": True, "memory": notes or ["(empty)"]}
+            return {"ok": True, "memory": self.recall() or ["(empty)"]}
 
         if text.startswith("search "):
             query = text[7:].strip()
@@ -168,29 +227,44 @@ class EkoController:
 
         if text in ("accounts", "balances", "live balances"):
             if self.mode != "live":
-                return {"ok": False, "message": "Switch to live mode first to view real balances."}
+                return {"ok": False, "message": "Switch to live mode first."}
             return {"ok": True, "accounts": self.live.get_accounts()}
+
+        if text in ("prefer limit", "use limit"):
+            self.prefer_limit = True
+            return {"ok": True, "message": "Prefer LIMIT orders enabled"}
+
+        if text in ("prefer market", "use market"):
+            self.prefer_limit = False
+            return {"ok": True, "message": "Prefer MARKET orders enabled"}
 
         return {
             "ok": False,
-            "message": "Unknown command. Try: status · live · paper · kill switch · force buy · remember ... · recall · search solana · accounts",
+            "message": (
+                "Commands: status · live · paper · kill switch · sync · cancel all · "
+                "force buy/sell · limit buy/sell · accounts · remember · recall · "
+                "prefer limit/market · search · market memory BTC"
+            ),
         }
 
     async def _status(self) -> dict:
-        market = None
         if self.last_market:
             market = self.last_market.to_dict()
         else:
             m = await self.data.get_market_state("BTC-USD")
             market = m.to_dict()
 
-        portfolio = self.paper.status() if self.mode == "paper" else self.live.status()
+        if self.mode == "live":
+            portfolio = self.live.status()
+        else:
+            portfolio = self.paper.status()
 
         return {
             "ok": True,
             "message": f"Eko online — mode={self.mode.upper()}",
             "mode": self.mode,
             "live_ready": self.live.is_ready(),
+            "prefer_limit": self.prefer_limit,
             "market": market,
             "signal": self.last_signal.to_dict() if self.last_signal else None,
             "risk": self.risk.status(),
@@ -199,7 +273,7 @@ class EkoController:
             "last_action": self.last_action,
         }
 
-    async def _force_trade(self, side: Side, text: str) -> dict:
+    async def _force_trade(self, side: Side, text: str, force_limit: bool = False) -> dict:
         symbol = "BTC-USD"
         for token in text.upper().split():
             if "-" in token or token in ("BTC", "ETH", "SOL"):
@@ -207,9 +281,12 @@ class EkoController:
                 break
 
         market = await self.data.get_market_state(symbol)
-
-        # Even smaller default size for forced live trades
         size = 0.001 if self.mode == "live" else 0.005
+
+        order_type = OrderType.LIMIT if (force_limit or (self.mode == "live" and self.prefer_limit)) else OrderType.MARKET
+        limit_price = None
+        if order_type == OrderType.LIMIT and market.last:
+            limit_price = round(market.last * (0.999 if side == Side.BUY else 1.001), 2)
 
         signal = Signal(
             side=side,
@@ -217,7 +294,10 @@ class EkoController:
             confidence=0.95,
             reason="Forced by user command",
             symbol=symbol,
+            order_type=order_type,
+            limit_price=limit_price,
         )
+
         allowed, reason = self.risk.check(signal, market)
         if not allowed:
             return {"ok": False, "message": f"Risk blocked: {reason}"}
@@ -227,6 +307,10 @@ class EkoController:
         if self.mode == "paper":
             self.risk.open_positions = self.paper.positions
             self.risk.update_equity(self.paper.equity)
+        else:
+            self.risk.sync_positions(self.live.positions)
+            if self.live.equity_usd > 0:
+                self.risk.update_equity(self.live.equity_usd)
 
         return {"ok": True, "mode": self.mode, "execution": result}
 

@@ -4,13 +4,17 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from enum import Enum
-import json
 
 
 class Side(Enum):
     BUY = "BUY"
     SELL = "SELL"
     HOLD = "HOLD"
+
+
+class OrderType(Enum):
+    MARKET = "MARKET"
+    LIMIT = "LIMIT"
 
 
 @dataclass
@@ -34,10 +38,12 @@ class MarketState:
 @dataclass
 class Signal:
     side: Side = Side.HOLD
-    size: float = 0.0          # fraction of equity or absolute units
+    size: float = 0.0
     confidence: float = 0.0
     reason: str = ""
     symbol: str = "BTC-USD"
+    order_type: OrderType = OrderType.MARKET
+    limit_price: Optional[float] = None  # required for LIMIT
 
     def to_dict(self) -> dict:
         return {
@@ -46,6 +52,8 @@ class Signal:
             "confidence": self.confidence,
             "reason": self.reason,
             "symbol": self.symbol,
+            "order_type": self.order_type.value,
+            "limit_price": self.limit_price,
         }
 
 
@@ -53,10 +61,11 @@ class Signal:
 class Position:
     symbol: str
     side: str                  # "LONG" or "FLAT"
-    size: float = 0.0          # base units
+    size: float = 0.0
     entry_price: float = 0.0
     unrealized_pnl: float = 0.0
     realized_pnl: float = 0.0
+    currency: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -72,6 +81,8 @@ class Trade:
     timestamp: str
     reason: str = ""
     pnl: float = 0.0
+    order_type: str = "MARKET"
+    live: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
