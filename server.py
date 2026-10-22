@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-import asyncio
+import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()  # load .env if present
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 import uvicorn
+import asyncio
 
 from eko_controller import EkoController
 
@@ -19,9 +21,7 @@ eko = EkoController()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # startup
     yield
-    # shutdown
     await eko.close()
 
 
@@ -51,13 +51,14 @@ async def eko_command(payload: dict):
 
 @app.get("/api/tick")
 async def tick(symbol: str = "BTC-USD"):
-    """Run one full architecture cycle."""
     return await eko.tick(symbol)
 
 
 @app.get("/api/portfolio")
 async def portfolio():
-    return eko.executor.status()
+    if eko.mode == "paper":
+        return eko.paper.status()
+    return eko.live.status()
 
 
 @app.get("/api/risk")
@@ -70,7 +71,6 @@ async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     try:
         while True:
-            # Send a live tick every 5 seconds
             data = await eko.tick("BTC-USD")
             await ws.send_json(data)
             await asyncio.sleep(5)

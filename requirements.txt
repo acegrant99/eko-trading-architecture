@@ -6,3 +6,5 @@ eth-account
 ccxt
 pandas
 pydantic
+coinbase-advanced-py
+python-dotenv

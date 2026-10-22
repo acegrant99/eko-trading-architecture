@@ -1,11 +1,12 @@
 """Eko Controller — the autonomous brain that ties everything together.
 
-Natural-language style commands + continuous risk-aware decision loop.
+Supports paper (default) and live trading modes.
+Live mode requires COINBASE_API_KEY + COINBASE_API_SECRET and explicit activation.
 """
 
 from __future__ import annotations
 
-import asyncio
+import os
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 
@@ -14,6 +15,7 @@ from data.models import Signal, Side
 from strategy.sma_crossover import SMACrossover
 from risk.risk_manager import RiskManager, RiskConfig
 from execution.paper_executor import PaperExecutor
+from execution.live_executor import LiveExecutor
 
 
 class EkoController:
@@ -22,13 +24,51 @@ class EkoController:
     def __init__(self):
         self.data = LiveDataProvider()
         self.strategy = SMACrossover(fast=5, slow=15)
-        self.risk = RiskManager(RiskConfig(), equity=10_000.0)
-        self.executor = PaperExecutor(starting_equity=10_000.0)
+
+        # More conservative defaults when live keys are present
+        risk_cfg = RiskConfig(
+            max_position_pct=0.02,       # tighter for live
+            max_daily_loss_pct=0.015,
+            min_confidence=0.60,
+            max_open_positions=2,
+        )
+        self.risk = RiskManager(risk_cfg, equity=10_000.0)
+
+        self.paper = PaperExecutor(starting_equity=10_000.0)
+        self.live = LiveExecutor()
+
+        # Default is always paper for safety
+        self.mode = "paper"  # "paper" | "live"
         self.memory: List[str] = []
         self.last_market = None
         self.last_signal: Optional[Signal] = None
         self.last_action: Dict[str, Any] = {}
         self.running = False
+
+    @property
+    def executor(self):
+        return self.live if self.mode == "live" else self.paper
+
+    def set_mode(self, mode: str) -> dict:
+        mode = mode.lower().strip()
+        if mode == "live":
+            if not self.live.is_ready():
+                return {
+                    "ok": False,
+                    "message": "Cannot enable LIVE mode: Coinbase API keys missing or client failed to init. "
+                               "Set COINBASE_API_KEY and COINBASE_API_SECRET environment variables.",
+                }
+            self.mode = "live"
+            self.remember("Switched to LIVE trading mode")
+            return {
+                "ok": True,
+                "message": "⚠️ LIVE MODE ENABLED. Real orders will be sent to Coinbase. Kill switch is available.",
+                "mode": "live",
+            }
+        else:
+            self.mode = "paper"
+            self.remember("Switched back to PAPER mode")
+            return {"ok": True, "message": "Paper mode active. No real orders.", "mode": "paper"}
 
     async def tick(self, symbol: str = "BTC-USD") -> dict:
         """One full cycle: data → strategy → risk → (maybe) execute."""
@@ -42,6 +82,7 @@ class EkoController:
 
         result = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "mode": self.mode,
             "market": market.to_dict(),
             "signal": signal.to_dict(),
             "risk_allowed": allowed,
@@ -49,12 +90,17 @@ class EkoController:
         }
 
         if allowed and signal.side != Side.HOLD:
+            # Extra safety: in live mode, force very small size unless user forced it
+            if self.mode == "live" and signal.confidence < 0.85:
+                signal.size = min(signal.size, 0.002)
+
             exec_result = self.executor.execute(signal, market)
             result["execution"] = exec_result
             self.last_action = exec_result
-            # keep risk manager in sync
-            self.risk.open_positions = self.executor.positions
-            self.risk.update_equity(self.executor.equity)
+
+            if self.mode == "paper":
+                self.risk.open_positions = self.paper.positions
+                self.risk.update_equity(self.paper.equity)
         else:
             result["execution"] = {"status": "skipped", "reason": reason}
 
@@ -75,6 +121,12 @@ class EkoController:
 
         if not text or text in ("status", "how are you", "eko status"):
             return await self._status()
+
+        if text in ("live", "go live", "enable live", "mode live"):
+            return self.set_mode("live")
+
+        if text in ("paper", "go paper", "enable paper", "mode paper"):
+            return self.set_mode("paper")
 
         if "kill switch" in text or text == "kill":
             on = "on" in text or "activate" in text or "enable" in text
@@ -114,9 +166,14 @@ class EkoController:
             market = await self.data.get_market_state(symbol)
             return {"ok": True, "market": market.to_dict()}
 
+        if text in ("accounts", "balances", "live balances"):
+            if self.mode != "live":
+                return {"ok": False, "message": "Switch to live mode first to view real balances."}
+            return {"ok": True, "accounts": self.live.get_accounts()}
+
         return {
             "ok": False,
-            "message": "Unknown command. Try: status · kill switch · force buy · remember ... · recall · search solana · market memory BTC",
+            "message": "Unknown command. Try: status · live · paper · kill switch · force buy · remember ... · recall · search solana · accounts",
         }
 
     async def _status(self) -> dict:
@@ -127,13 +184,17 @@ class EkoController:
             m = await self.data.get_market_state("BTC-USD")
             market = m.to_dict()
 
+        portfolio = self.paper.status() if self.mode == "paper" else self.live.status()
+
         return {
             "ok": True,
-            "message": "Eko online",
+            "message": f"Eko online — mode={self.mode.upper()}",
+            "mode": self.mode,
+            "live_ready": self.live.is_ready(),
             "market": market,
             "signal": self.last_signal.to_dict() if self.last_signal else None,
             "risk": self.risk.status(),
-            "portfolio": self.executor.status(),
+            "portfolio": portfolio,
             "memory_count": len(self.memory),
             "last_action": self.last_action,
         }
@@ -146,10 +207,14 @@ class EkoController:
                 break
 
         market = await self.data.get_market_state(symbol)
+
+        # Even smaller default size for forced live trades
+        size = 0.001 if self.mode == "live" else 0.005
+
         signal = Signal(
             side=side,
-            size=0.005,
-            confidence=0.9,
+            size=size,
+            confidence=0.95,
             reason="Forced by user command",
             symbol=symbol,
         )
@@ -158,9 +223,12 @@ class EkoController:
             return {"ok": False, "message": f"Risk blocked: {reason}"}
 
         result = self.executor.execute(signal, market)
-        self.risk.open_positions = self.executor.positions
-        self.risk.update_equity(self.executor.equity)
-        return {"ok": True, "execution": result}
+
+        if self.mode == "paper":
+            self.risk.open_positions = self.paper.positions
+            self.risk.update_equity(self.paper.equity)
+
+        return {"ok": True, "mode": self.mode, "execution": result}
 
     async def close(self):
         await self.data.close()

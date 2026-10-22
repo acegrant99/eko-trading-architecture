@@ -2,61 +2,39 @@
 
 Autonomous crypto trading system with **Eko** as the controller.
 
+> ⚠️ **Live trading involves real money and real risk.**  
+> Paper mode is the default. Live mode is opt-in and requires explicit activation.
+
 ## Features
-- Live market data (Coinbase public ticker + CoinGecko search + DexScreener)
-- SMA crossover strategy (with warm-up)
+- Live market data (Coinbase public ticker + CoinGecko + DexScreener)
+- SMA crossover strategy
 - Risk-first gate (kill switch, position limits, confidence floor, daily loss limit)
-- Paper execution with cash/position tracking and persistent trade log
+- **Paper execution** (default) with position tracking
+- **Live execution** via Coinbase Advanced Trade API
 - Natural-language Eko commands
-- Clean dark UI with live metrics + chat
+- Dark dashboard UI
 
 ## Architecture
 ```
-Data → Strategy → Risk Gate → Execution → Monitoring
+Data → Strategy → Risk Gate → Execution (Paper | Live) → Monitoring
          ↑
-    EkoController (conscience + memory + commands)
+    EkoController (mode switch + conscience + memory)
 ```
 
-## Quick Start
+## Quick Start (Paper)
 ```bash
 pip install -r requirements.txt
 python server.py
 # open http://localhost:8000
 ```
 
-## Talk to Eko
-| Command | Action |
-|---------|--------|
-| `status` | Full system status |
-| `kill switch` / `kill switch off` | Halt or resume trading |
-| `force buy` / `force sell` | Manual paper trade |
-| `remember <note>` | Store a note in memory |
-| `recall` | Show recent memory |
-| `search <query>` | CoinGecko search |
-| `market memory BTC` | Fetch live ticker |
+## Live Trading Setup
 
-## Project Layout
-```
-├── data/
-│   ├── live_data.py      # Coinbase / CoinGecko / DexScreener
-│   ├── models.py         # MarketState, Signal, Position, Trade
-│   └── trade_log.jsonl   # created at runtime
-├── strategy/
-│   ├── base.py
-│   └── sma_crossover.py
-├── risk/
-│   └── risk_manager.py
-├── execution/
-│   ├── paper_executor.py
-│   └── trade_logger.py
-├── ui/
-│   └── 3d-architecture.html
-├── eko_controller.py     # The brain
-├── server.py             # FastAPI + WebSocket
-└── requirements.txt
-```
+1. Create a **Coinbase Advanced Trade** API key (CDP / Coinbase Developer Platform):
+   - https://portal.cdp.coinbase.com/
+   - Create an API key with **Trade** permission
+   - Prefer **ECDSA** keys if using the official Python SDK
 
-## Notes
-- Everything runs in **paper** mode by default.
-- No API keys required for the public data endpoints used.
-- Kill switch is the highest-priority safety control.
+2. Export the keys (never commit them):
+```bash
+export COINBASE_API_KEY="organizations/..."
