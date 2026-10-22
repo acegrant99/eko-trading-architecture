@@ -1,9 +1,331 @@
 <!DOCTYPE html>
-<html>
-<head><title>Eko 3D Architecture</title></head>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Eko Trading Architecture</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --panel: #141a2a;
+      --border: #1e293b;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --green: #22c55e;
+      --red: #ef4444;
+      --yellow: #eab308;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 1rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--panel);
+    }
+    header h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+    .eko-face {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #0ea5e9, #6366f1);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.1rem;
+      animation: pulse 3s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(56,189,248,0.4); }
+      50% { transform: scale(1.05); box-shadow: 0 0 0 8px rgba(56,189,248,0); }
+    }
+    .status-pill {
+      font-size: 0.75rem;
+      padding: 0.25rem 0.7rem;
+      border-radius: 999px;
+      background: #14532d;
+      color: #86efac;
+    }
+    .status-pill.off { background: #7f1d1d; color: #fca5a5; }
+    main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      gap: 1rem;
+      padding: 1rem;
+    }
+    @media (max-width: 900px) {
+      main { grid-template-columns: 1fr; }
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1rem 1.25rem;
+    }
+    .panel h2 {
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      margin-bottom: 0.75rem;
+    }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+    }
+    .metric {
+      background: #0f172a;
+      border-radius: 8px;
+      padding: 0.75rem;
+    }
+    .metric .label { font-size: 0.7rem; color: var(--muted); }
+    .metric .value { font-size: 1.25rem; font-weight: 600; margin-top: 0.2rem; }
+    .metric .value.up { color: var(--green); }
+    .metric .value.down { color: var(--red); }
+    #chat-log {
+      height: 320px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+      margin-bottom: 0.75rem;
+      font-size: 0.9rem;
+    }
+    .msg { padding: 0.5rem 0.75rem; border-radius: 8px; max-width: 95%; }
+    .msg.user { background: #1e3a5f; align-self: flex-end; }
+    .msg.eko { background: #1e293b; align-self: flex-start; }
+    .msg .time { font-size: 0.65rem; color: var(--muted); margin-top: 0.2rem; }
+    #cmd-form {
+      display: flex;
+      gap: 0.5rem;
+    }
+    #cmd-input {
+      flex: 1;
+      background: #0f172a;
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 0.6rem 0.9rem;
+      border-radius: 8px;
+      font-size: 0.9rem;
+    }
+    #cmd-input:focus { outline: none; border-color: var(--accent); }
+    button {
+      background: var(--accent);
+      color: #0b0f19;
+      border: none;
+      padding: 0.6rem 1rem;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover { filter: brightness(1.1); }
+    .signal-badge {
+      display: inline-block;
+      padding: 0.2rem 0.5rem;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+    .BUY { background: #14532d; color: #86efac; }
+    .SELL { background: #7f1d1d; color: #fca5a5; }
+    .HOLD { background: #334155; color: #cbd5e1; }
+    pre {
+      background: #0f172a;
+      padding: 0.75rem;
+      border-radius: 8px;
+      font-size: 0.75rem;
+      overflow-x: auto;
+      max-height: 180px;
+    }
+    .hints {
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-top: 0.5rem;
+    }
+  </style>
+</head>
 <body>
-<h1>Eko Trading Architecture</h1>
-<p>3D UI with Lightweight Charts, conscience, memory, and real-time prices.</p>
-<p>Full source available in the local package.</p>
+  <header>
+    <h1>
+      <div class="eko-face">◎</div>
+      Eko Trading Architecture
+    </h1>
+    <div id="kill-pill" class="status-pill">LIVE</div>
+  </header>
+
+  <main>
+    <div style="display:flex; flex-direction:column; gap:1rem;">
+      <div class="panel">
+        <h2>Market & Signal</h2>
+        <div class="grid-2">
+          <div class="metric">
+            <div class="label">BTC-USD Last</div>
+            <div class="value" id="price">—</div>
+          </div>
+          <div class="metric">
+            <div class="label">Spread (bps)</div>
+            <div class="value" id="spread">—</div>
+          </div>
+          <div class="metric">
+            <div class="label">Signal</div>
+            <div class="value"><span class="signal-badge HOLD" id="signal">HOLD</span></div>
+          </div>
+          <div class="metric">
+            <div class="label">Confidence</div>
+            <div class="value" id="confidence">—</div>
+          </div>
+        </div>
+        <p style="margin-top:0.75rem; font-size:0.85rem; color:var(--muted);" id="reason">Waiting for data…</p>
+      </div>
+
+      <div class="panel">
+        <h2>Portfolio</h2>
+        <div class="grid-2">
+          <div class="metric">
+            <div class="label">Equity</div>
+            <div class="value" id="equity">$10,000</div>
+          </div>
+          <div class="metric">
+            <div class="label">Cash</div>
+            <div class="value" id="cash">$10,000</div>
+          </div>
+        </div>
+        <pre id="positions">No open positions</pre>
+      </div>
+
+      <div class="panel">
+        <h2>Last Tick (raw)</h2>
+        <pre id="raw">—</pre>
+      </div>
+    </div>
+
+    <div class="panel" style="display:flex; flex-direction:column;">
+      <h2>Talk to Eko</h2>
+      <div id="chat-log"></div>
+      <form id="cmd-form">
+        <input id="cmd-input" placeholder="status · kill switch · force buy · remember …" autocomplete="off" />
+        <button type="submit">Send</button>
+      </form>
+      <div class="hints">
+        Try: <code>status</code> · <code>kill switch</code> · <code>force buy</code> · <code>remember volatility high</code> · <code>recall</code> · <code>search solana</code>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const chatLog = document.getElementById('chat-log');
+    const form = document.getElementById('cmd-form');
+    const input = document.getElementById('cmd-input');
+
+    function addMsg(text, who = 'eko') {
+      const div = document.createElement('div');
+      div.className = `msg ${who}`;
+      const time = new Date().toLocaleTimeString();
+      div.innerHTML = `${text}<div class="time">${time}</div>`;
+      chatLog.appendChild(div);
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+
+    function updateUI(data) {
+      if (!data) return;
+      const m = data.market || {};
+      const s = data.signal || {};
+      const p = data.portfolio || data.portfolio;
+
+      if (m.last) document.getElementById('price').textContent = '$' + Number(m.last).toLocaleString(undefined, {maximumFractionDigits: 2});
+      if (m.spread_bps !== undefined) document.getElementById('spread').textContent = m.spread_bps;
+
+      const side = s.side || 'HOLD';
+      const badge = document.getElementById('signal');
+      badge.textContent = side;
+      badge.className = 'signal-badge ' + side;
+
+      document.getElementById('confidence').textContent = s.confidence != null ? (s.confidence * 100).toFixed(0) + '%' : '—';
+      document.getElementById('reason').textContent = s.reason || data.risk_reason || '—';
+
+      if (data.portfolio) {
+        document.getElementById('equity').textContent = '$' + Number(data.portfolio.equity).toLocaleString();
+        document.getElementById('cash').textContent = '$' + Number(data.portfolio.cash).toLocaleString();
+        const pos = data.portfolio.positions || {};
+        document.getElementById('positions').textContent = Object.keys(pos).length
+          ? JSON.stringify(pos, null, 2)
+          : 'No open positions';
+      }
+
+      if (data.risk && data.risk.kill_switch) {
+        document.getElementById('kill-pill').textContent = 'KILL SWITCH';
+        document.getElementById('kill-pill').classList.add('off');
+      } else {
+        document.getElementById('kill-pill').textContent = 'LIVE';
+        document.getElementById('kill-pill').classList.remove('off');
+      }
+
+      document.getElementById('raw').textContent = JSON.stringify(data, null, 2);
+    }
+
+    async function sendCommand(text) {
+      addMsg(text, 'user');
+      try {
+        const res = await fetch('/api/eko/command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text })
+        });
+        const data = await res.json();
+        updateUI(data);
+        const msg = data.message || (data.ok ? 'Done' : 'Something went wrong');
+        addMsg(typeof msg === 'string' ? msg : JSON.stringify(msg, null, 2));
+        if (data.memory) addMsg('Memory:\n' + data.memory.join('\n'));
+        if (data.results) addMsg('Search results:\n' + JSON.stringify(data.results, null, 2));
+        if (data.execution) addMsg('Execution: ' + JSON.stringify(data.execution));
+      } catch (e) {
+        addMsg('Error: ' + e.message);
+      }
+    }
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = '';
+      sendCommand(text);
+    });
+
+    // Initial status + periodic ticks
+    async function refresh() {
+      try {
+        const res = await fetch('/api/tick');
+        const data = await res.json();
+        updateUI({ ...data, portfolio: data.execution ? null : null });
+        // also pull full status for portfolio
+        const st = await (await fetch('/api/status')).json();
+        updateUI(st);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    addMsg('Eko online. Type a command or just watch the live ticks.');
+    refresh();
+    setInterval(refresh, 8000);
+  </script>
 </body>
 </html>

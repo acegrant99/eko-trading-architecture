@@ -1,29 +1,84 @@
-"""FastAPI server that serves the 3D UI and provides live status wired to the real architecture modules.
-Eko is the superior controller that executes real actions on the system from natural language prompts.
-"""
+"""FastAPI server that serves the UI and exposes Eko + architecture APIs."""
 
-from fastapi import FastAPI
+from __future__ import annotations
+
+import asyncio
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
-from pathlib import Path
-from datetime import datetime
-import json
-import hashlib
 
-app = FastAPI(title="Eko Trading Architecture")
+from eko_controller import EkoController
+
+eko = EkoController()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # startup
+    yield
+    # shutdown
+    await eko.close()
+
+
+app = FastAPI(title="Eko Trading Architecture", lifespan=lifespan)
+
 
 @app.get("/")
 def root():
     return FileResponse("ui/3d-architecture.html")
 
+
 @app.get("/api/status")
-def status():
-    return {"status": "ok", "time": datetime.utcnow().isoformat()}
+async def status():
+    return await eko._status()
+
 
 @app.get("/api/eko/status")
-def eko_status():
-    return {"ok": True, "message": "Eko ready"}
+async def eko_status():
+    return await eko._status()
+
+
+@app.post("/api/eko/command")
+async def eko_command(payload: dict):
+    text = payload.get("text") or payload.get("command") or ""
+    return await eko.handle_command(text)
+
+
+@app.get("/api/tick")
+async def tick(symbol: str = "BTC-USD"):
+    """Run one full architecture cycle."""
+    return await eko.tick(symbol)
+
+
+@app.get("/api/portfolio")
+async def portfolio():
+    return eko.executor.status()
+
+
+@app.get("/api/risk")
+async def risk():
+    return eko.risk.status()
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+    try:
+        while True:
+            # Send a live tick every 5 seconds
+            data = await eko.tick("BTC-USD")
+            await ws.send_json(data)
+            await asyncio.sleep(5)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        await ws.close()
+
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
