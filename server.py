@@ -1,27 +1,43 @@
-"""FastAPI server that serves the UI and exposes Eko + architecture APIs."""
+"""FastAPI server — serves UI and drives Eko's autonomous thinking loop."""
 
 from __future__ import annotations
 
-import os
+import asyncio
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from dotenv import load_dotenv
-load_dotenv()  # load .env if present
+load_dotenv()
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 import uvicorn
-import asyncio
 
 from eko_controller import EkoController
 
 eko = EkoController()
+_background_task = None
+
+
+async def _background_auto():
+    """Server-side loop so autonomous mode works even without an external client."""
+    while True:
+        try:
+            if eko.autonomous:
+                await eko.think_and_act("BTC-USD")
+            await asyncio.sleep(eko.auto_interval_sec if eko.autonomous else 5)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            await asyncio.sleep(5)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _background_task
+    _background_task = asyncio.create_task(_background_auto())
     yield
+    if _background_task:
+        _background_task.cancel()
     await eko.close()
 
 
@@ -51,7 +67,7 @@ async def eko_command(payload: dict):
 
 @app.get("/api/tick")
 async def tick(symbol: str = "BTC-USD"):
-    return await eko.tick(symbol)
+    return await eko.think_and_act(symbol)
 
 
 @app.get("/api/portfolio")
@@ -66,12 +82,17 @@ async def risk():
     return eko.risk.status()
 
 
+@app.get("/api/conscience")
+async def conscience():
+    return eko.conscience.status()
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     try:
         while True:
-            data = await eko.tick("BTC-USD")
+            data = await eko.think_and_act("BTC-USD")
             await ws.send_json(data)
             await asyncio.sleep(5)
     except WebSocketDisconnect:

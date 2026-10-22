@@ -1,14 +1,11 @@
-"""Eko Controller — autonomous brain with paper + live modes.
+"""Eko Controller — driven by conscience + subconscious.
 
-Live features:
-- Limit + market orders
-- Position / balance sync from Coinbase
-- Tighter live-only risk rules
-- Cancel-all support
+Autonomous loop trades according to how Eko feels and thinks.
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 
@@ -18,6 +15,7 @@ from strategy.sma_crossover import SMACrossover
 from risk.risk_manager import RiskManager, RiskConfig
 from execution.paper_executor import PaperExecutor
 from execution.live_executor import LiveExecutor
+from conscience.brain import Conscience, Subconscious
 
 
 class EkoController:
@@ -25,7 +23,6 @@ class EkoController:
         self.data = LiveDataProvider()
         self.strategy = SMACrossover(fast=5, slow=15)
 
-        # Base (paper) risk config — still conservative
         risk_cfg = RiskConfig(
             max_position_pct=0.03,
             max_daily_loss_pct=0.02,
@@ -39,12 +36,20 @@ class EkoController:
         self.paper = PaperExecutor(starting_equity=10_000.0)
         self.live = LiveExecutor()
 
+        self.subconscious = Subconscious()
+        self.conscience = Conscience(self.subconscious)
+
         self.mode = "paper"
-        self.prefer_limit = True          # prefer limit orders when possible
-        self.memory: List[str] = []
+        self.prefer_limit = True
+        self.autonomous = False
+        self._auto_task: Optional[asyncio.Task] = None
+        self.auto_interval_sec = 20
+
         self.last_market = None
         self.last_signal: Optional[Signal] = None
+        self.last_feeling = None
         self.last_action: Dict[str, Any] = {}
+        self.decision_log: List[dict] = []
 
     @property
     def executor(self):
@@ -58,7 +63,6 @@ class EkoController:
                     "ok": False,
                     "message": "Cannot enable LIVE mode: set COINBASE_API_KEY and COINBASE_API_SECRET first.",
                 }
-            # Sync real balances before enabling
             sync = self.live.sync_positions()
             if "error" in sync:
                 return {"ok": False, "message": f"Failed to sync positions: {sync['error']}"}
@@ -68,10 +72,10 @@ class EkoController:
             if self.live.equity_usd > 0:
                 self.risk.update_equity(self.live.equity_usd)
             self.risk.sync_positions(self.live.positions)
-            self.remember("Switched to LIVE trading mode")
+            self.subconscious.remember("Entered LIVE mode — conscience on high alert")
             return {
                 "ok": True,
-                "message": "⚠️ LIVE MODE ENABLED. Real orders will be sent. Kill switch available. Positions synced.",
+                "message": "⚠️ LIVE MODE ENABLED. Conscience is watching. Kill switch available.",
                 "mode": "live",
                 "sync": sync,
             }
@@ -80,61 +84,99 @@ class EkoController:
             self.risk.set_live_mode(False)
             self.risk.sync_positions(self.paper.positions)
             self.risk.update_equity(self.paper.equity)
-            self.remember("Switched back to PAPER mode")
+            self.subconscious.remember("Returned to PAPER mode")
             return {"ok": True, "message": "Paper mode active. No real orders.", "mode": "paper"}
 
-    def _build_signal(self, raw: Signal, market) -> Signal:
-        """Optionally convert strategy signal into a limit order."""
-        if not self.prefer_limit or raw.side == Side.HOLD:
-            return raw
+    def _build_signal(self, raw: Signal, market, feeling) -> Signal:
+        """Scale size by conscience aggression and optionally use limits."""
+        size = raw.size * max(0.05, feeling.aggression)
 
-        last = market.last or 0
-        if last <= 0:
-            return raw
+        if self.mode == "live":
+            size = min(size, 0.0015 * feeling.aggression)
 
-        # Slightly passive limit: buy below, sell above
-        if raw.side == Side.BUY:
-            limit_price = round(last * 0.9995, 2)
-        else:
-            limit_price = round(last * 1.0005, 2)
+        order_type = OrderType.MARKET
+        limit_price = None
+        if self.prefer_limit and raw.side != Side.HOLD and market.last:
+            order_type = OrderType.LIMIT
+            limit_price = round(
+                market.last * (0.9995 if raw.side == Side.BUY else 1.0005),
+                2,
+            )
+
+        # Blend confidence with conscience trust
+        confidence = raw.confidence * 0.6 + feeling.trust_signal * 0.4
 
         return Signal(
             side=raw.side,
-            size=raw.size,
-            confidence=raw.confidence,
-            reason=raw.reason + " [limit]",
+            size=size,
+            confidence=confidence,
+            reason=f"{raw.reason} | mood={feeling.mood} agg={feeling.aggression:.2f}",
             symbol=raw.symbol,
-            order_type=OrderType.LIMIT,
+            order_type=order_type,
             limit_price=limit_price,
         )
 
-    async def tick(self, symbol: str = "BTC-USD") -> dict:
+    async def think_and_act(self, symbol: str = "BTC-USD") -> dict:
+        """Full cognitive cycle: sense → feel → strategize → risk → (maybe) act."""
         market = await self.data.get_market_state(symbol)
         self.last_market = market
 
+        if market.last:
+            self.subconscious.observe_price(symbol, market.last)
+
+        # Strategy proposes
         raw_signal = self.strategy.generate_signal(market)
-        signal = self._build_signal(raw_signal, market) if self.mode == "live" else raw_signal
+
+        # Conscience forms a feeling
+        equity = self.paper.equity if self.mode == "paper" else (self.live.equity_usd or self.risk.equity)
+        feeling = self.conscience.feel(
+            symbol=symbol,
+            signal_confidence=raw_signal.confidence,
+            equity=equity,
+            daily_pnl=self.risk.daily_pnl,
+            kill_switch=self.risk.config.kill_switch,
+        )
+        self.last_feeling = feeling
+
+        # Shape signal with feeling
+        signal = self._build_signal(raw_signal, market, feeling)
         self.last_signal = signal
 
-        allowed, reason = self.risk.check(signal, market)
+        # Risk gate
+        allowed, risk_reason = self.risk.check(signal, market)
 
-        result = {
+        # Conscience final approval
+        conscience_ok, conscience_reason = self.conscience.approve(feeling)
+
+        decision = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "mode": self.mode,
             "market": market.to_dict(),
+            "raw_signal": raw_signal.to_dict(),
             "signal": signal.to_dict(),
+            "feeling": feeling.to_dict(),
             "risk_allowed": allowed,
-            "risk_reason": reason,
+            "risk_reason": risk_reason,
+            "conscience_ok": conscience_ok,
+            "conscience_reason": conscience_reason,
         }
 
-        if allowed and signal.side != Side.HOLD:
-            if self.mode == "live":
-                # Extra hard size cap for autonomous live ticks
-                signal.size = min(signal.size, 0.0015)
-
+        if allowed and conscience_ok and signal.side != Side.HOLD:
             exec_result = self.executor.execute(signal, market)
-            result["execution"] = exec_result
+            decision["execution"] = exec_result
             self.last_action = exec_result
+
+            # Feed outcome into subconscious when we have pnl info
+            pnl = 0.0
+            if isinstance(exec_result, dict):
+                trade = exec_result.get("trade") or {}
+                pnl = float(trade.get("pnl") or 0.0)
+            self.subconscious.record_outcome(
+                symbol=signal.symbol,
+                side=signal.side.value,
+                pnl=pnl,
+                reason=signal.reason,
+            )
 
             if self.mode == "paper":
                 self.risk.open_positions = self.paper.positions
@@ -144,24 +186,78 @@ class EkoController:
                 if self.live.equity_usd > 0:
                     self.risk.update_equity(self.live.equity_usd)
         else:
-            result["execution"] = {"status": "skipped", "reason": reason}
+            why = risk_reason if not allowed else conscience_reason
+            decision["execution"] = {"status": "skipped", "reason": why}
 
-        return result
+        self.decision_log.append(decision)
+        if len(self.decision_log) > 50:
+            self.decision_log = self.decision_log[-50:]
+
+        return decision
+
+    # Backwards-compatible alias
+    async def tick(self, symbol: str = "BTC-USD") -> dict:
+        return await self.think_and_act(symbol)
+
+    async def _auto_loop(self):
+        while self.autonomous:
+            try:
+                await self.think_and_act("BTC-USD")
+            except Exception as e:
+                self.subconscious.remember(f"Auto-loop error: {e}")
+            await asyncio.sleep(self.auto_interval_sec)
+
+    def start_autonomous(self, interval_sec: int = 20) -> dict:
+        if self.autonomous:
+            return {"ok": True, "message": "Already running autonomously"}
+        self.auto_interval_sec = max(8, interval_sec)
+        self.autonomous = True
+        try:
+            loop = asyncio.get_running_loop()
+            self._auto_task = loop.create_task(self._auto_loop())
+        except RuntimeError:
+            # No running loop yet — server will drive via periodic ticks
+            pass
+        self.subconscious.remember(f"Autonomous trading started (every {self.auto_interval_sec}s)")
+        return {
+            "ok": True,
+            "message": f"Eko is now thinking and trading autonomously every {self.auto_interval_sec}s according to conscience.",
+            "autonomous": True,
+        }
+
+    def stop_autonomous(self) -> dict:
+        self.autonomous = False
+        if self._auto_task and not self._auto_task.done():
+            self._auto_task.cancel()
+        self._auto_task = None
+        self.subconscious.remember("Autonomous trading stopped")
+        return {"ok": True, "message": "Autonomous trading stopped. Eko is idle.", "autonomous": False}
 
     def remember(self, note: str):
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-        self.memory.append(f"[{ts}] {note}")
-        if len(self.memory) > 100:
-            self.memory = self.memory[-100:]
+        self.subconscious.remember(note)
 
     def recall(self, limit: int = 10) -> List[str]:
-        return self.memory[-limit:]
+        return self.subconscious.notes[-limit:]
 
     async def handle_command(self, text: str) -> dict:
         text = (text or "").strip().lower()
 
-        if not text or text in ("status", "how are you", "eko status"):
+        if not text or text in ("status", "how are you", "eko status", "how do you feel"):
             return await self._status()
+
+        if text in ("think", "feel", "what do you think"):
+            d = await self.think_and_act("BTC-USD")
+            return {
+                "ok": True,
+                "message": f"Mood: {d['feeling']['mood']} · aggression={d['feeling']['aggression']}",
+                **{k: d[k] for k in ("feeling", "signal", "conscience_ok", "conscience_reason", "execution", "mode")},
+            }
+
+        if text in ("auto", "start auto", "autonomous", "run", "go"):
+            return self.start_autonomous()
+
+        if text in ("stop", "stop auto", "halt auto", "pause"):
+            return self.stop_autonomous()
 
         if text in ("live", "go live", "enable live", "mode live"):
             return self.set_mode("live")
@@ -173,29 +269,31 @@ class EkoController:
             off = "off" in text or "deactivate" in text or "disable" in text
             if off:
                 self.risk.set_kill_switch(False)
-                return {"ok": True, "message": "Kill switch DEACTIVATED. Trading resumed."}
+                self.subconscious.remember("Kill switch deactivated")
+                return {"ok": True, "message": "Kill switch DEACTIVATED."}
             self.risk.set_kill_switch(True)
+            self.subconscious.remember("Kill switch activated by user")
             return {"ok": True, "message": "Kill switch ACTIVATED. All trading halted."}
 
-        if text in ("cancel all", "cancel orders", "flatten orders"):
+        if text in ("cancel all", "cancel orders"):
             if self.mode != "live":
-                return {"ok": False, "message": "Cancel only available in live mode."}
+                return {"ok": False, "message": "Cancel only in live mode."}
             result = self.live.cancel_all_orders()
             return {"ok": True, "message": "Cancel request sent", "result": result}
 
-        if text in ("sync", "sync positions", "refresh positions"):
+        if text in ("sync", "sync positions"):
             if self.mode != "live":
-                return {"ok": False, "message": "Sync only meaningful in live mode."}
+                return {"ok": False, "message": "Sync only in live mode."}
             sync = self.live.sync_positions()
             self.risk.sync_positions(self.live.positions)
             if self.live.equity_usd > 0:
                 self.risk.update_equity(self.live.equity_usd)
             return {"ok": True, "message": "Positions synced", "sync": sync}
 
-        if text.startswith("force buy") or text.startswith("buy"):
+        if text.startswith("force buy") or text.startswith("buy "):
             return await self._force_trade(Side.BUY, text)
 
-        if text.startswith("force sell") or text.startswith("sell"):
+        if text.startswith("force sell") or text.startswith("sell "):
             return await self._force_trade(Side.SELL, text)
 
         if text.startswith("limit buy"):
@@ -209,7 +307,7 @@ class EkoController:
             self.remember(note)
             return {"ok": True, "message": f"Remembered: {note}"}
 
-        if text in ("recall", "memory", "what do you remember"):
+        if text in ("recall", "memory"):
             return {"ok": True, "memory": self.recall() or ["(empty)"]}
 
         if text.startswith("search "):
@@ -225,25 +323,27 @@ class EkoController:
             market = await self.data.get_market_state(symbol)
             return {"ok": True, "market": market.to_dict()}
 
-        if text in ("accounts", "balances", "live balances"):
+        if text in ("accounts", "balances"):
             if self.mode != "live":
                 return {"ok": False, "message": "Switch to live mode first."}
             return {"ok": True, "accounts": self.live.get_accounts()}
 
         if text in ("prefer limit", "use limit"):
             self.prefer_limit = True
-            return {"ok": True, "message": "Prefer LIMIT orders enabled"}
+            return {"ok": True, "message": "Prefer LIMIT orders"}
 
         if text in ("prefer market", "use market"):
             self.prefer_limit = False
-            return {"ok": True, "message": "Prefer MARKET orders enabled"}
+            return {"ok": True, "message": "Prefer MARKET orders"}
+
+        if text in ("conscience", "principles"):
+            return {"ok": True, "conscience": self.conscience.status()}
 
         return {
             "ok": False,
             "message": (
-                "Commands: status · live · paper · kill switch · sync · cancel all · "
-                "force buy/sell · limit buy/sell · accounts · remember · recall · "
-                "prefer limit/market · search · market memory BTC"
+                "Commands: status · think · auto · stop · live · paper · kill switch · "
+                "sync · cancel all · force/limit buy|sell · remember · recall · conscience · accounts"
             ),
         }
 
@@ -254,22 +354,23 @@ class EkoController:
             m = await self.data.get_market_state("BTC-USD")
             market = m.to_dict()
 
-        if self.mode == "live":
-            portfolio = self.live.status()
-        else:
-            portfolio = self.paper.status()
+        portfolio = self.paper.status() if self.mode == "paper" else self.live.status()
+        feeling = self.last_feeling.to_dict() if self.last_feeling else None
 
         return {
             "ok": True,
-            "message": f"Eko online — mode={self.mode.upper()}",
+            "message": f"Eko online — mode={self.mode.upper()} · auto={self.autonomous}",
             "mode": self.mode,
+            "autonomous": self.autonomous,
             "live_ready": self.live.is_ready(),
             "prefer_limit": self.prefer_limit,
+            "feeling": feeling,
+            "conscience": self.conscience.status(market.get("symbol", "BTC-USD")),
             "market": market,
             "signal": self.last_signal.to_dict() if self.last_signal else None,
             "risk": self.risk.status(),
             "portfolio": portfolio,
-            "memory_count": len(self.memory),
+            "memory_count": len(self.subconscious.notes),
             "last_action": self.last_action,
         }
 
@@ -281,8 +382,10 @@ class EkoController:
                 break
 
         market = await self.data.get_market_state(symbol)
-        size = 0.001 if self.mode == "live" else 0.005
+        if market.last:
+            self.subconscious.observe_price(symbol, market.last)
 
+        size = 0.001 if self.mode == "live" else 0.005
         order_type = OrderType.LIMIT if (force_limit or (self.mode == "live" and self.prefer_limit)) else OrderType.MARKET
         limit_price = None
         if order_type == OrderType.LIMIT and market.last:
@@ -292,7 +395,7 @@ class EkoController:
             side=side,
             size=size,
             confidence=0.95,
-            reason="Forced by user command",
+            reason="Forced by user",
             symbol=symbol,
             order_type=order_type,
             limit_price=limit_price,
@@ -301,6 +404,17 @@ class EkoController:
         allowed, reason = self.risk.check(signal, market)
         if not allowed:
             return {"ok": False, "message": f"Risk blocked: {reason}"}
+
+        # Even forced trades pass through a soft conscience check
+        feeling = self.conscience.feel(
+            symbol=symbol,
+            signal_confidence=0.95,
+            equity=self.risk.equity,
+            daily_pnl=self.risk.daily_pnl,
+            kill_switch=self.risk.config.kill_switch,
+        )
+        if feeling.mood == "fearful" and feeling.aggression < 0.15:
+            return {"ok": False, "message": f"Conscience strongly opposed (mood={feeling.mood})"}
 
         result = self.executor.execute(signal, market)
 
@@ -312,7 +426,8 @@ class EkoController:
             if self.live.equity_usd > 0:
                 self.risk.update_equity(self.live.equity_usd)
 
-        return {"ok": True, "mode": self.mode, "execution": result}
+        return {"ok": True, "mode": self.mode, "feeling": feeling.to_dict(), "execution": result}
 
     async def close(self):
+        self.stop_autonomous()
         await self.data.close()
