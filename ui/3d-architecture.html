@@ -32,6 +32,7 @@
       align-items: center;
       justify-content: space-between;
       background: var(--panel);
+      gap: 0.75rem;
     }
     header h1 {
       font-size: 1.25rem;
@@ -55,14 +56,18 @@
       0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(56,189,248,0.4); }
       50% { transform: scale(1.05); box-shadow: 0 0 0 8px rgba(56,189,248,0); }
     }
+    .pills { display: flex; gap: 0.5rem; align-items: center; }
     .status-pill {
       font-size: 0.75rem;
       padding: 0.25rem 0.7rem;
       border-radius: 999px;
       background: #14532d;
       color: #86efac;
+      font-weight: 600;
     }
     .status-pill.off { background: #7f1d1d; color: #fca5a5; }
+    .status-pill.paper { background: #1e3a5f; color: #93c5fd; }
+    .status-pill.live-mode { background: #7c2d12; color: #fdba74; }
     main {
       flex: 1;
       display: grid;
@@ -98,8 +103,6 @@
     }
     .metric .label { font-size: 0.7rem; color: var(--muted); }
     .metric .value { font-size: 1.25rem; font-weight: 600; margin-top: 0.2rem; }
-    .metric .value.up { color: var(--green); }
-    .metric .value.down { color: var(--red); }
     #chat-log {
       height: 320px;
       overflow-y: auto;
@@ -109,14 +112,11 @@
       margin-bottom: 0.75rem;
       font-size: 0.9rem;
     }
-    .msg { padding: 0.5rem 0.75rem; border-radius: 8px; max-width: 95%; }
+    .msg { padding: 0.5rem 0.75rem; border-radius: 8px; max-width: 95%; white-space: pre-wrap; }
     .msg.user { background: #1e3a5f; align-self: flex-end; }
     .msg.eko { background: #1e293b; align-self: flex-start; }
     .msg .time { font-size: 0.65rem; color: var(--muted); margin-top: 0.2rem; }
-    #cmd-form {
-      display: flex;
-      gap: 0.5rem;
-    }
+    #cmd-form { display: flex; gap: 0.5rem; }
     #cmd-input {
       flex: 1;
       background: #0f172a;
@@ -159,6 +159,7 @@
       font-size: 0.75rem;
       color: var(--muted);
       margin-top: 0.5rem;
+      line-height: 1.4;
     }
   </style>
 </head>
@@ -168,7 +169,10 @@
       <div class="eko-face">◎</div>
       Eko Trading Architecture
     </h1>
-    <div id="kill-pill" class="status-pill">LIVE</div>
+    <div class="pills">
+      <div id="mode-pill" class="status-pill paper">PAPER</div>
+      <div id="kill-pill" class="status-pill">ACTIVE</div>
+    </div>
   </header>
 
   <main>
@@ -221,11 +225,12 @@
       <h2>Talk to Eko</h2>
       <div id="chat-log"></div>
       <form id="cmd-form">
-        <input id="cmd-input" placeholder="status · kill switch · force buy · remember …" autocomplete="off" />
+        <input id="cmd-input" placeholder="status · live · paper · kill switch · force buy …" autocomplete="off" />
         <button type="submit">Send</button>
       </form>
       <div class="hints">
-        Try: <code>status</code> · <code>kill switch</code> · <code>force buy</code> · <code>remember volatility high</code> · <code>recall</code> · <code>search solana</code>
+        <code>status</code> · <code>live</code> · <code>paper</code> · <code>kill switch</code><br>
+        <code>force buy</code> · <code>accounts</code> · <code>remember …</code> · <code>recall</code>
       </div>
     </div>
   </main>
@@ -248,7 +253,6 @@
       if (!data) return;
       const m = data.market || {};
       const s = data.signal || {};
-      const p = data.portfolio || data.portfolio;
 
       if (m.last) document.getElementById('price').textContent = '$' + Number(m.last).toLocaleString(undefined, {maximumFractionDigits: 2});
       if (m.spread_bps !== undefined) document.getElementById('spread').textContent = m.spread_bps;
@@ -261,21 +265,38 @@
       document.getElementById('confidence').textContent = s.confidence != null ? (s.confidence * 100).toFixed(0) + '%' : '—';
       document.getElementById('reason').textContent = s.reason || data.risk_reason || '—';
 
+      // Mode badge
+      const modePill = document.getElementById('mode-pill');
+      const mode = (data.mode || 'paper').toLowerCase();
+      if (mode === 'live') {
+        modePill.textContent = 'LIVE';
+        modePill.className = 'status-pill live-mode';
+      } else {
+        modePill.textContent = 'PAPER';
+        modePill.className = 'status-pill paper';
+      }
+
+      // Kill switch
+      const killPill = document.getElementById('kill-pill');
+      if (data.risk && data.risk.kill_switch) {
+        killPill.textContent = 'KILL SWITCH';
+        killPill.classList.add('off');
+      } else {
+        killPill.textContent = 'ACTIVE';
+        killPill.classList.remove('off');
+      }
+
       if (data.portfolio) {
-        document.getElementById('equity').textContent = '$' + Number(data.portfolio.equity).toLocaleString();
-        document.getElementById('cash').textContent = '$' + Number(data.portfolio.cash).toLocaleString();
+        if (data.portfolio.equity != null) {
+          document.getElementById('equity').textContent = '$' + Number(data.portfolio.equity).toLocaleString();
+        }
+        if (data.portfolio.cash != null) {
+          document.getElementById('cash').textContent = '$' + Number(data.portfolio.cash).toLocaleString();
+        }
         const pos = data.portfolio.positions || {};
         document.getElementById('positions').textContent = Object.keys(pos).length
           ? JSON.stringify(pos, null, 2)
-          : 'No open positions';
-      }
-
-      if (data.risk && data.risk.kill_switch) {
-        document.getElementById('kill-pill').textContent = 'KILL SWITCH';
-        document.getElementById('kill-pill').classList.add('off');
-      } else {
-        document.getElementById('kill-pill').textContent = 'LIVE';
-        document.getElementById('kill-pill').classList.remove('off');
+          : (data.mode === 'live' ? JSON.stringify(data.portfolio, null, 2) : 'No open positions');
       }
 
       document.getElementById('raw').textContent = JSON.stringify(data, null, 2);
@@ -296,6 +317,7 @@
         if (data.memory) addMsg('Memory:\n' + data.memory.join('\n'));
         if (data.results) addMsg('Search results:\n' + JSON.stringify(data.results, null, 2));
         if (data.execution) addMsg('Execution: ' + JSON.stringify(data.execution));
+        if (data.accounts) addMsg('Accounts: ' + JSON.stringify(data.accounts, null, 2));
       } catch (e) {
         addMsg('Error: ' + e.message);
       }
@@ -309,13 +331,8 @@
       sendCommand(text);
     });
 
-    // Initial status + periodic ticks
     async function refresh() {
       try {
-        const res = await fetch('/api/tick');
-        const data = await res.json();
-        updateUI({ ...data, portfolio: data.execution ? null : null });
-        // also pull full status for portfolio
         const st = await (await fetch('/api/status')).json();
         updateUI(st);
       } catch (e) {
@@ -323,7 +340,7 @@
       }
     }
 
-    addMsg('Eko online. Type a command or just watch the live ticks.');
+    addMsg('Eko online in PAPER mode.\nSet COINBASE_API_KEY + COINBASE_API_SECRET, then type "live" to enable real trading.');
     refresh();
     setInterval(refresh, 8000);
   </script>
