@@ -1,1 +1,1 @@
-print('Eko trading architecture — run server.py')
+print("Eko trading architecture — run server.py")

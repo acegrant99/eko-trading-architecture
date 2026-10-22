@@ -3,3 +3,6 @@ uvicorn
 websockets
 httpx
 eth-account
+ccxt
+pandas
+pydantic
