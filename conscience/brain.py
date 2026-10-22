@@ -4,16 +4,21 @@ The conscience enforces capital-protection principles and forms a high-level
 "feeling" about the market and the system's health.
 
 The subconscious accumulates volatility, regime, and outcome memory that
-bias future decisions.
+bias future decisions. Seed notes from data/memory_seed.json load on startup.
 """
 
 from __future__ import annotations
 
+import json
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Deque, Dict, List, Optional, Any
 import statistics
+
+
+SEED_PATH = Path(__file__).resolve().parent.parent / "data" / "memory_seed.json"
 
 
 @dataclass
@@ -36,11 +41,24 @@ class Feeling:
 class Subconscious:
     """Accumulates volatility, regime, and per-market outcome memory."""
 
-    def __init__(self, max_prices: int = 120, max_outcomes: int = 50):
+    def __init__(self, max_prices: int = 120, max_outcomes: int = 50, load_seed: bool = True):
         self.prices: Dict[str, Deque[float]] = {}
         self.outcomes: Deque[dict] = deque(maxlen=max_outcomes)
-        self.notes: List[str] = []          # free-form long-term memory
+        self.notes: List[str] = []
         self.max_prices = max_prices
+        if load_seed:
+            self._load_seed()
+
+    def _load_seed(self):
+        try:
+            if SEED_PATH.exists():
+                raw = json.loads(SEED_PATH.read_text(encoding="utf-8"))
+                if isinstance(raw, list):
+                    for note in raw:
+                        if isinstance(note, str) and note.strip():
+                            self.notes.append(note.strip())
+        except Exception:
+            pass
 
     def observe_price(self, symbol: str, price: float):
         if symbol not in self.prices:
@@ -64,7 +82,6 @@ class Subconscious:
             self.notes = self.notes[-200:]
 
     def volatility(self, symbol: str) -> Optional[float]:
-        """Simple return-std proxy for recent volatility."""
         series = self.prices.get(symbol)
         if not series or len(series) < 8:
             return None
@@ -89,7 +106,6 @@ class Subconscious:
         return wins / len(recent)
 
     def regime(self, symbol: str) -> str:
-        """Very light regime label from short vs longer price trend."""
         series = list(self.prices.get(symbol) or [])
         if len(series) < 15:
             return "unknown"
@@ -107,7 +123,7 @@ class Subconscious:
             "regime": self.regime(symbol),
             "recent_pnl": self.recent_pnl(),
             "win_rate": self.win_rate(),
-            "notes": self.notes[-8:],
+            "notes": self.notes[-12:],
             "outcome_count": len(self.outcomes),
         }
 
@@ -153,7 +169,6 @@ class Conscience:
         recent_pnl = self.sub.recent_pnl()
         win_rate = self.sub.win_rate()
 
-        # Volatility dampener
         if vol is not None:
             if vol > 0.012:
                 aggression *= 0.45
@@ -164,7 +179,6 @@ class Conscience:
                 aggression *= 1.1
                 notes.append("Low volatility — slightly more room")
 
-        # Regime bias
         if regime == "downtrend":
             aggression *= 0.6
             notes.append("Downtrend regime — defensive")
@@ -175,7 +189,6 @@ class Conscience:
             if mood == "neutral":
                 mood = "confident"
 
-        # Recent performance
         if recent_pnl < 0:
             aggression *= 0.5
             trust *= 0.75
@@ -186,7 +199,6 @@ class Conscience:
             notes.append("Recent wins — measured confidence")
             mood = "confident"
 
-        # Daily equity drawdown
         if equity > 0 and daily_pnl < 0:
             dd = abs(daily_pnl) / equity
             if dd > 0.01:
@@ -194,16 +206,32 @@ class Conscience:
                 notes.append(f"Daily drawdown {dd*100:.1f}% — protect capital")
                 mood = "fearful"
 
-        # Memory notes that mention risk/fear words bias caution
-        fear_words = ("volatile", "crash", "careful", "risk", "fear", "uncertain")
-        for n in self.sub.notes[-10:]:
+        # Memory bias from seed + user notes
+        caution_words = (
+            "volatile", "crash", "careful", "risk", "fear", "uncertain",
+            "risk-off", "avoid", "weak", "extended", "chase", "fomo",
+            "survival", "reduce size", "pullback",
+        )
+        confidence_words = ("outperform", "momentum", "strength", "uptrend", "bid")
+        mem_caution = 0
+        mem_confidence = 0
+        for n in self.sub.notes[-20:]:
             lower = n.lower()
-            if any(w in lower for w in fear_words):
-                aggression *= 0.85
-                notes.append("Memory note urges caution")
-                break
+            if any(w in lower for w in caution_words):
+                mem_caution += 1
+            if any(w in lower for w in confidence_words):
+                mem_confidence += 1
 
-        # Clamp
+        if mem_caution > 0:
+            aggression *= max(0.5, 1.0 - 0.06 * mem_caution)
+            notes.append(f"Memory urges caution ({mem_caution} notes)")
+            if mood in ("neutral", "confident"):
+                mood = "cautious"
+
+        if mem_confidence > mem_caution and regime == "uptrend":
+            aggression *= 1.05
+            notes.append("Memory supports selective strength")
+
         aggression = max(0.0, min(1.0, aggression))
         trust = max(0.0, min(1.0, trust))
 
@@ -217,7 +245,6 @@ class Conscience:
         return feeling
 
     def approve(self, feeling: Feeling, min_aggression: float = 0.2) -> tuple[bool, str]:
-        """Final conscience gate."""
         if feeling.aggression < min_aggression:
             return False, f"Conscience withholds approval (aggression={feeling.aggression:.2f}, mood={feeling.mood})"
         if feeling.trust_signal < 0.35:
