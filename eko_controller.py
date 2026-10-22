@@ -1,6 +1,7 @@
-"""Eko Controller — driven by conscience + subconscious.
+"""Eko Controller — Evosystem autonomous trading.
 
-Autonomous loop trades according to how Eko feels and thinks.
+Eko thinks and trades across his ecosystem (multi-asset watchlist)
+according to conscience + subconscious.
 """
 
 from __future__ import annotations
@@ -18,16 +19,28 @@ from execution.live_executor import LiveExecutor
 from conscience.brain import Conscience, Subconscious
 
 
+# Default Evosystem — assets Eko may autonomously trade
+DEFAULT_EVOSYSTEM = [
+    "BTC-USD",
+    "ETH-USD",
+    "SOL-USD",
+    "LINK-USD",
+    "DOGE-USD",
+]
+
+
 class EkoController:
     def __init__(self):
         self.data = LiveDataProvider()
-        self.strategy = SMACrossover(fast=5, slow=15)
+
+        # Per-symbol strategies so SMA memory never mixes assets
+        self.strategies: Dict[str, SMACrossover] = {}
 
         risk_cfg = RiskConfig(
             max_position_pct=0.03,
             max_daily_loss_pct=0.02,
             min_confidence=0.58,
-            max_open_positions=3,
+            max_open_positions=4,
             max_notional_usd=1000.0,
             require_limit_in_live=False,
         )
@@ -43,13 +56,27 @@ class EkoController:
         self.prefer_limit = True
         self.autonomous = False
         self._auto_task: Optional[asyncio.Task] = None
-        self.auto_interval_sec = 20
+        self.auto_interval_sec = 25
+
+        # Evosystem watchlist
+        self.evosystem: List[str] = list(DEFAULT_EVOSYSTEM)
+        self._evo_index = 0
 
         self.last_market = None
         self.last_signal: Optional[Signal] = None
         self.last_feeling = None
         self.last_action: Dict[str, Any] = {}
+        self.last_ecosystem_cycle: List[dict] = []
         self.decision_log: List[dict] = []
+
+        self.subconscious.remember(
+            "Evosystem online — autonomous multi-asset trading under conscience"
+        )
+
+    def _strategy_for(self, symbol: str) -> SMACrossover:
+        if symbol not in self.strategies:
+            self.strategies[symbol] = SMACrossover(fast=5, slow=15)
+        return self.strategies[symbol]
 
     @property
     def executor(self):
@@ -75,7 +102,7 @@ class EkoController:
             self.subconscious.remember("Entered LIVE mode — conscience on high alert")
             return {
                 "ok": True,
-                "message": "⚠️ LIVE MODE ENABLED. Conscience is watching. Kill switch available.",
+                "message": "⚠️ LIVE MODE ENABLED in Evosystem. Conscience is watching.",
                 "mode": "live",
                 "sync": sync,
             }
@@ -88,7 +115,6 @@ class EkoController:
             return {"ok": True, "message": "Paper mode active. No real orders.", "mode": "paper"}
 
     def _build_signal(self, raw: Signal, market, feeling) -> Signal:
-        """Scale size by conscience aggression and optionally use limits."""
         size = raw.size * max(0.05, feeling.aggression)
 
         if self.mode == "live":
@@ -103,7 +129,6 @@ class EkoController:
                 2,
             )
 
-        # Blend confidence with conscience trust
         confidence = raw.confidence * 0.6 + feeling.trust_signal * 0.4
 
         return Signal(
@@ -117,17 +142,16 @@ class EkoController:
         )
 
     async def think_and_act(self, symbol: str = "BTC-USD") -> dict:
-        """Full cognitive cycle: sense → feel → strategize → risk → (maybe) act."""
+        """Full cognitive cycle for one symbol."""
         market = await self.data.get_market_state(symbol)
         self.last_market = market
 
         if market.last:
             self.subconscious.observe_price(symbol, market.last)
 
-        # Strategy proposes
-        raw_signal = self.strategy.generate_signal(market)
+        strategy = self._strategy_for(symbol)
+        raw_signal = strategy.generate_signal(market)
 
-        # Conscience forms a feeling
         equity = self.paper.equity if self.mode == "paper" else (self.live.equity_usd or self.risk.equity)
         feeling = self.conscience.feel(
             symbol=symbol,
@@ -138,19 +162,16 @@ class EkoController:
         )
         self.last_feeling = feeling
 
-        # Shape signal with feeling
         signal = self._build_signal(raw_signal, market, feeling)
         self.last_signal = signal
 
-        # Risk gate
         allowed, risk_reason = self.risk.check(signal, market)
-
-        # Conscience final approval
         conscience_ok, conscience_reason = self.conscience.approve(feeling)
 
         decision = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "mode": self.mode,
+            "symbol": symbol,
             "market": market.to_dict(),
             "raw_signal": raw_signal.to_dict(),
             "signal": signal.to_dict(),
@@ -166,7 +187,6 @@ class EkoController:
             decision["execution"] = exec_result
             self.last_action = exec_result
 
-            # Feed outcome into subconscious when we have pnl info
             pnl = 0.0
             if isinstance(exec_result, dict):
                 trade = exec_result.get("trade") or {}
@@ -190,39 +210,91 @@ class EkoController:
             decision["execution"] = {"status": "skipped", "reason": why}
 
         self.decision_log.append(decision)
-        if len(self.decision_log) > 50:
-            self.decision_log = self.decision_log[-50:]
+        if len(self.decision_log) > 80:
+            self.decision_log = self.decision_log[-80:]
 
         return decision
 
-    # Backwards-compatible alias
+    async def ecosystem_cycle(self) -> dict:
+        """One full Evosystem pass — think_and_act on every watchlist symbol."""
+        results = []
+        for symbol in list(self.evosystem):
+            try:
+                d = await self.think_and_act(symbol)
+                results.append({
+                    "symbol": symbol,
+                    "side": (d.get("signal") or {}).get("side"),
+                    "mood": (d.get("feeling") or {}).get("mood"),
+                    "aggression": (d.get("feeling") or {}).get("aggression"),
+                    "conscience_ok": d.get("conscience_ok"),
+                    "execution": (d.get("execution") or {}).get("status"),
+                    "reason": (d.get("execution") or {}).get("reason")
+                        or d.get("conscience_reason")
+                        or d.get("risk_reason"),
+                })
+            except Exception as e:
+                results.append({"symbol": symbol, "error": str(e)})
+            await asyncio.sleep(0.35)  # gentle on public APIs
+
+        self.last_ecosystem_cycle = results
+        acted = sum(1 for r in results if r.get("execution") in ("filled", "submitted"))
+        return {
+            "ok": True,
+            "message": f"Evosystem cycle complete — {acted} action(s) across {len(results)} markets",
+            "mode": self.mode,
+            "autonomous": self.autonomous,
+            "cycle": results,
+            "feeling": self.last_feeling.to_dict() if self.last_feeling else None,
+            "portfolio": self.paper.status() if self.mode == "paper" else self.live.status(),
+        }
+
     async def tick(self, symbol: str = "BTC-USD") -> dict:
         return await self.think_and_act(symbol)
 
     async def _auto_loop(self):
+        """Round-robin single-symbol ticks between full ecosystem sweeps."""
+        sweeps = 0
         while self.autonomous:
             try:
-                await self.think_and_act("BTC-USD")
+                # Every 3rd iteration: full ecosystem sweep
+                if sweeps % 3 == 0:
+                    await self.ecosystem_cycle()
+                else:
+                    sym = self.evosystem[self._evo_index % len(self.evosystem)]
+                    self._evo_index += 1
+                    await self.think_and_act(sym)
+                sweeps += 1
             except Exception as e:
-                self.subconscious.remember(f"Auto-loop error: {e}")
+                self.subconscious.remember(f"Evosystem auto error: {e}")
             await asyncio.sleep(self.auto_interval_sec)
 
-    def start_autonomous(self, interval_sec: int = 20) -> dict:
+    def start_autonomous(self, interval_sec: int = 25) -> dict:
         if self.autonomous:
-            return {"ok": True, "message": "Already running autonomously"}
-        self.auto_interval_sec = max(8, interval_sec)
+            return {
+                "ok": True,
+                "message": "Evosystem already autonomous",
+                "autonomous": True,
+                "evosystem": self.evosystem,
+            }
+        self.auto_interval_sec = max(10, interval_sec)
         self.autonomous = True
         try:
             loop = asyncio.get_running_loop()
             self._auto_task = loop.create_task(self._auto_loop())
         except RuntimeError:
-            # No running loop yet — server will drive via periodic ticks
             pass
-        self.subconscious.remember(f"Autonomous trading started (every {self.auto_interval_sec}s)")
+        self.subconscious.remember(
+            f"Evosystem autonomous ON — {self.evosystem} every {self.auto_interval_sec}s"
+        )
         return {
             "ok": True,
-            "message": f"Eko is now thinking and trading autonomously every {self.auto_interval_sec}s according to conscience.",
+            "message": (
+                f"Eko is autonomously trading his Evosystem every {self.auto_interval_sec}s. "
+                f"Markets: {', '.join(self.evosystem)}. Conscience governs all decisions."
+            ),
             "autonomous": True,
+            "evosystem": self.evosystem,
+            "mode": self.mode,
         }
 
     def stop_autonomous(self) -> dict:
@@ -230,13 +302,29 @@ class EkoController:
         if self._auto_task and not self._auto_task.done():
             self._auto_task.cancel()
         self._auto_task = None
-        self.subconscious.remember("Autonomous trading stopped")
-        return {"ok": True, "message": "Autonomous trading stopped. Eko is idle.", "autonomous": False}
+        self.subconscious.remember("Evosystem autonomous OFF")
+        return {"ok": True, "message": "Evosystem autonomous trading stopped.", "autonomous": False}
+
+    def set_evosystem(self, symbols: List[str]) -> dict:
+        cleaned = []
+        for s in symbols:
+            s = s.strip().upper()
+            if not s:
+                continue
+            if "-" not in s:
+                s = f"{s}-USD"
+            cleaned.append(s)
+        if not cleaned:
+            return {"ok": False, "message": "Evosystem cannot be empty"}
+        self.evosystem = cleaned
+        self._evo_index = 0
+        self.subconscious.remember(f"Evosystem updated: {cleaned}")
+        return {"ok": True, "message": f"Evosystem now: {', '.join(cleaned)}", "evosystem": cleaned}
 
     def remember(self, note: str):
         self.subconscious.remember(note)
 
-    def recall(self, limit: int = 10) -> List[str]:
+    def recall(self, limit: int = 12) -> List[str]:
         return self.subconscious.notes[-limit:]
 
     async def handle_command(self, text: str) -> dict:
@@ -253,11 +341,19 @@ class EkoController:
                 **{k: d[k] for k in ("feeling", "signal", "conscience_ok", "conscience_reason", "execution", "mode")},
             }
 
+        if text in ("ecosystem", "evosystem", "scan", "cycle"):
+            return await self.ecosystem_cycle()
+
         if text in ("auto", "start auto", "autonomous", "run", "go"):
             return self.start_autonomous()
 
         if text in ("stop", "stop auto", "halt auto", "pause"):
             return self.stop_autonomous()
+
+        if text.startswith("evosystem ") or text.startswith("watchlist "):
+            parts = text.split(None, 1)[1]
+            syms = [p.strip() for p in parts.replace(",", " ").split() if p.strip()]
+            return self.set_evosystem(syms)
 
         if text in ("live", "go live", "enable live", "mode live"):
             return self.set_mode("live")
@@ -273,7 +369,7 @@ class EkoController:
                 return {"ok": True, "message": "Kill switch DEACTIVATED."}
             self.risk.set_kill_switch(True)
             self.subconscious.remember("Kill switch activated by user")
-            return {"ok": True, "message": "Kill switch ACTIVATED. All trading halted."}
+            return {"ok": True, "message": "Kill switch ACTIVATED. All Evosystem trading halted."}
 
         if text in ("cancel all", "cancel orders"):
             if self.mode != "live":
@@ -342,8 +438,9 @@ class EkoController:
         return {
             "ok": False,
             "message": (
-                "Commands: status · think · auto · stop · live · paper · kill switch · "
-                "sync · cancel all · force/limit buy|sell · remember · recall · conscience · accounts"
+                "Commands: status · think · evosystem/cycle · auto · stop · "
+                "evosystem BTC ETH SOL · live · paper · kill switch · "
+                "remember · recall · conscience · accounts"
             ),
         }
 
@@ -359,9 +456,10 @@ class EkoController:
 
         return {
             "ok": True,
-            "message": f"Eko online — mode={self.mode.upper()} · auto={self.autonomous}",
+            "message": f"Eko Evosystem — mode={self.mode.upper()} · auto={self.autonomous}",
             "mode": self.mode,
             "autonomous": self.autonomous,
+            "evosystem": self.evosystem,
             "live_ready": self.live.is_ready(),
             "prefer_limit": self.prefer_limit,
             "feeling": feeling,
@@ -370,6 +468,7 @@ class EkoController:
             "signal": self.last_signal.to_dict() if self.last_signal else None,
             "risk": self.risk.status(),
             "portfolio": portfolio,
+            "last_ecosystem_cycle": self.last_ecosystem_cycle[-8:],
             "memory_count": len(self.subconscious.notes),
             "last_action": self.last_action,
         }
@@ -377,7 +476,7 @@ class EkoController:
     async def _force_trade(self, side: Side, text: str, force_limit: bool = False) -> dict:
         symbol = "BTC-USD"
         for token in text.upper().split():
-            if "-" in token or token in ("BTC", "ETH", "SOL"):
+            if "-" in token or token in ("BTC", "ETH", "SOL", "LINK", "DOGE"):
                 symbol = token if "-" in token else f"{token}-USD"
                 break
 
@@ -405,7 +504,6 @@ class EkoController:
         if not allowed:
             return {"ok": False, "message": f"Risk blocked: {reason}"}
 
-        # Even forced trades pass through a soft conscience check
         feeling = self.conscience.feel(
             symbol=symbol,
             signal_confidence=0.95,

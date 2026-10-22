@@ -1,4 +1,4 @@
-"""FastAPI server — serves UI and drives Eko's autonomous thinking loop."""
+"""FastAPI server — drives Eko's Evosystem autonomous loop."""
 
 from __future__ import annotations
 
@@ -19,16 +19,25 @@ _background_task = None
 
 
 async def _background_auto():
-    """Server-side loop so autonomous mode works even without an external client."""
+    """Server-side Evosystem loop when autonomous is on."""
+    sweeps = 0
     while True:
         try:
             if eko.autonomous:
-                await eko.think_and_act("BTC-USD")
-            await asyncio.sleep(eko.auto_interval_sec if eko.autonomous else 5)
+                if sweeps % 3 == 0:
+                    await eko.ecosystem_cycle()
+                else:
+                    syms = eko.evosystem
+                    sym = syms[sweeps % len(syms)]
+                    await eko.think_and_act(sym)
+                sweeps += 1
+                await asyncio.sleep(eko.auto_interval_sec)
+            else:
+                await asyncio.sleep(5)
         except asyncio.CancelledError:
             break
         except Exception:
-            await asyncio.sleep(5)
+            await asyncio.sleep(8)
 
 
 @asynccontextmanager
@@ -41,7 +50,7 @@ async def lifespan(app: FastAPI):
     await eko.close()
 
 
-app = FastAPI(title="Eko Trading Architecture", lifespan=lifespan)
+app = FastAPI(title="Eko Evosystem", lifespan=lifespan)
 
 
 @app.get("/")
@@ -68,6 +77,11 @@ async def eko_command(payload: dict):
 @app.get("/api/tick")
 async def tick(symbol: str = "BTC-USD"):
     return await eko.think_and_act(symbol)
+
+
+@app.get("/api/ecosystem")
+async def ecosystem():
+    return await eko.ecosystem_cycle()
 
 
 @app.get("/api/portfolio")

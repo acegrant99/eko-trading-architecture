@@ -1,35 +1,35 @@
-# Architecture
-
-Risk-first modular design:
+# Architecture — Eko Evosystem
 
 ```
-Data → Strategy → Conscience + Subconscious → Risk Gate → Execution → Monitoring
+Data → Strategy (per symbol) → Conscience + Subconscious → Risk Gate → Execution
+                                    ↑
+                         Evosystem autonomous loop
 ```
 
-## EkoController
-Analyzes the system and adjusts risk/signals autonomously.
+## Evosystem
+Eko’s multi-asset domain. Default watchlist:
 
-## Conscience Brain
-Enforces capital-protection principles and forms a **Feeling**:
-- mood: calm | cautious | confident | fearful | greedy
-- aggression: 0–1 size multiplier
-- trust_signal: how much to trust the strategy
+`BTC-USD · ETH-USD · SOL-USD · LINK-USD · DOGE-USD`
 
-Principles:
-- Never risk ruin for a single idea
-- Reduce size when uncertain or losing
-- Respect the kill switch above all
-- Prefer survival over opportunity
-- Let memory of pain slow the next decision
-
-## Subconscious
-Accumulates:
-- Price history → volatility + regime (uptrend / downtrend / range)
-- Trade outcomes → recent PnL + win rate
-- Free-form notes (`remember …`)
-
-These bias the next Feeling.
+Configurable via: `evosystem BTC ETH SOL XMR`
 
 ## Autonomous loop
-`auto` starts continuous `think_and_act` cycles.  
-Each cycle: sense market → strategy proposes → conscience feels → risk checks → execute only if both risk and conscience approve.
+- `auto` — continuous trading across the Evosystem
+- Full **ecosystem cycle** every 3rd tick (all symbols)
+- Round-robin single-symbol ticks in between
+- Every decision still requires **risk + conscience** approval
+
+## Conscience Brain
+Feeling: mood · aggression · trust_signal  
+Biased by volatility, regime, outcomes, and memory seeds.
+
+## Commands
+| Command | Action |
+|---------|--------|
+| `auto` | Start Evosystem autonomy |
+| `stop` | Stop autonomy |
+| `evosystem` / `cycle` | One full multi-asset pass |
+| `evosystem BTC ETH SOL` | Set watchlist |
+| `think` | Single BTC cognitive cycle |
+| `live` / `paper` | Execution mode |
+| `kill switch` | Freeze all orders |
